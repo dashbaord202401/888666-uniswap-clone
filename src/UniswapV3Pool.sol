@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT 
 pragma solidity ^0.8.14;
 
+import "./interfaces/IERC20.sol";
+import "./interfaces/IUniswapV3MintCallback.sol";
+import "./interfaces/IUniswapV3SwapCallback.sol";
+
 import "./lib/Tick.sol";
 import "./lib/Position.sol";
 
@@ -8,6 +12,30 @@ contract UniswapV3Pool {
     using Tick for mapping(int24 => Tick.Info);
     using Position for mapping(bytes32 => Position.Info);
     using Position for Position.Info;
+
+    error InsufficientInputAmount();
+    error InvalidTickRange();
+    error ZeroLiquidity();
+
+    event Mint(
+        address sender,
+        address indexed owner,
+        int24 indexed tickLower,
+        int24 indexed tickUpper,
+        uint128 amount,
+        uint256 amount0,
+        uint256 amount1
+    );
+
+    event Swap(
+        address indexed sender,
+        address indexed recipient,
+        int256 amount0,
+        int256 amount1,
+        uint160 sqrtPriceX96,
+        uint128 liquidity,
+        int24 tick
+    );
 
     int24 internal constant MIN_TICK = -887272;
     int24 internal constant MAX_TICK = -MIN_TICK;
@@ -21,6 +49,12 @@ contract UniswapV3Pool {
     struct Slot0 {
         uint160 sqrtPriceX96; // curr sqrt(P)
         int24 tick; // curr tick
+    }
+
+    struct CallbackData {
+        address token0;
+        address token1;
+        address payer;
     }
 
     Slot0 public slot0;
@@ -41,69 +75,107 @@ contract UniswapV3Pool {
         slot0 = Slot0({sqrtPriceX96: sqrtPriceX96, tick: tick});
     }
 
-//     // minting; info: v2 mints liquidity tokens when providing liquidity, v3 doesnt do that they mint nft
-//     // figure out signed integers were used for tick - sarvad
-//     function mint(
-//         address owner, // address depositing
-//         int24 lowerTick, // lower price range
-//         int24 upperTick, // upper price range
-//         uint128 amount // amount depositing
-//     ) external returns (uint256 amount0, uint256 amount1) {
+    // minting; info: v2 mints liquidity tokens when providing liquidity, v3 doesnt do that they mint nft
+    // figure out signed integers were used for tick - sarvad
+    function mint(
+        address owner, // address depositing
+        int24 lowerTick, // lower price range
+        int24 upperTick, // upper price range
+        uint128 amount, // amount depositing
+        bytes calldata data // data holding details
+    ) external returns (uint256 amount0, uint256 amount1) {
 
-//         // edge cases checks
-//         if (lowerTick >= upperTick || lowerTick < MIN_TICK || upperTick > MAX_TICK) {
-//             revert InvalidTickRange();
-//         }
+        // edge cases checks
+        if (lowerTick >= upperTick || lowerTick < MIN_TICK || upperTick > MAX_TICK) {
+            revert InvalidTickRange();
+        }
 
-//         if (amount == 0) {
-//             revert ZeroLiquidity();
-//         }
+        if (amount == 0) {
+            revert ZeroLiquidity();
+        }
 
-//         // update tick and positions
-//         ticks.update(lowerTick,amount);
-//         ticks.update(upperTick, amount);
+        // update tick and positions
+        ticks.update(lowerTick,amount);
+        ticks.update(upperTick, amount);
 
-//         Position.Info storage position = positions.get(owner, lowerTick, upperTick);
-//         position.update(amount);
+        Position.Info storage position = positions.get(owner, lowerTick, upperTick);
+        position.update(amount);
 
-//         // amounts - hard coded for now
-//         amount0 = 0.998976618347425280 ether;
-//         amount1 = 5000 ether;
+        // amounts - hard coded for now
+        amount0 = 0.998976618347425280 ether;
+        amount1 = 5000 ether;
 
-//         liquidity += uint128(amount);
+        liquidity += uint128(amount);
 
-//         // balance checks
-//         uint256 balance0Before;
-//         uint256 balance1Before;
+        // balance checks
+        uint256 balance0Before;
+        uint256 balance1Before;
 
-//         if (amount0 > 0) balance0Before = balance0();
-//         if (amount1 > 0) balance1Before = balance1();
+        if (amount0 > 0) balance0Before = balance0();
+        if (amount1 > 0) balance1Before = balance1();
 
-//         IUniswapV3MintCallback(msg.sender).uniswapV3MintCallback(
-//             amount0,
-//             amount1
-//         );
+        IUniswapV3MintCallback(msg.sender).uniswapV3MintCallback(
+            amount0,
+            amount1,
+            data
+        );
 
-//         // balance0 over here is the updated balance after depositing token0 amount
-//         if (amount0 > 0 && balance0Before + amount0 > balance0()) {
-//             revert InsufficientInputAmount();
-//         }
+        // balance0 over here is the updated balance after depositing token0 amount
+        if (amount0 > 0 && balance0Before + amount0 > balance0()) {
+            revert InsufficientInputAmount();
+        }
 
-//         // balance1 over here is the updated balance after depositing token1 amount
-//         if (amount1 > 0 && balance1Before + amount1 > balance1()) {
-//             revert InsufficientInputAmount();
-//         }
+        // balance1 over here is the updated balance after depositing token1 amount
+        if (amount1 > 0 && balance1Before + amount1 > balance1()) {
+            revert InsufficientInputAmount();
+        }
 
-//         // mint completion
-//         emit Mint(msg.sender, owner, lowerTick, upperTick, amount, amount0, amount1);
-//     }
+        // mint completion
+        emit Mint(msg.sender, owner, lowerTick, upperTick, amount, amount0, amount1);
+    }
 
-//     function balance0() internal returns (uint256 balance) {
-//         balance = IERC20(token0).balanceOf(address(this));
-//     }
+    function swap(address recipient, bytes calldata data) public returns (int256 amount0, int256 amount1) {
 
-//     function balance1() internal returns (uint256 balance) {
-//         balance = IERC20(token1).balanceOf(address(this));
-//     }
+        // target price and tick
+        int24 nextTick = 85184;
+        uint160 nextPrice = 5604469350942327889444743441197;
+
+        // amount sold and bougth
+        amount0 = -0.008396714242162444 ether;
+        amount1 = 42 ether;
+
+        // update slot0
+        (slot0.tick, slot0.sqrtPriceX96) = (nextTick, nextPrice);
+
+        // send the token x to recipient and receive from token y from recipient
+        IERC20(token0).transfer(recipient, uint256(-amount0));
+        uint256 balanceBefore1 = balance1();
+        IUniswapV3SwapCallback(recipient).uniswapV3SwapCallback(amount0, amount1, data);
+
+        // balance check for validation
+        if (balanceBefore1 + uint256(amount1) < balance1()) {
+            revert InsufficientInputAmount();
+        }
+
+        // one way swap complete
+        emit Swap(
+                msg.sender,
+                recipient,
+                amount0,
+                amount1,
+                slot0.sqrtPriceX96,
+                liquidity,
+                slot0.tick
+            );
+    }
+
+    // helper functions
+    function balance0() internal returns (uint256 balance) {
+        balance = IERC20(token0).balanceOf(address(this));
+    }
+
+    function balance1() internal returns (uint256 balance) {
+        balance = IERC20(token1).balanceOf(address(this));
+    }
 
 }
