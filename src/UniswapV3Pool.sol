@@ -150,10 +150,10 @@ contract UniswapV3Pool {
         // send the token x to recipient and receive from token y from recipient
         IERC20(token0).transfer(recipient, uint256(-amount0));
         uint256 balanceBefore1 = balance1();
-        IUniswapV3SwapCallback(recipient).uniswapV3SwapCallback(amount0, amount1, data);
+        IUniswapV3SwapCallback(msg.sender).uniswapV3SwapCallback(amount0, amount1, data);
 
         // balance check for validation
-        if (balanceBefore1 + uint256(amount1) < balance1()) {
+        if (balanceBefore1 + uint256(amount1) > balance1()) {
             revert InsufficientInputAmount();
         }
 
