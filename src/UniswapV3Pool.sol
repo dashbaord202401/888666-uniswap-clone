@@ -5,11 +5,16 @@ import "./interfaces/IERC20.sol";
 import "./interfaces/IUniswapV3MintCallback.sol";
 import "./interfaces/IUniswapV3SwapCallback.sol";
 
-import "./lib/Tick.sol";
+import "./lib/Math.sol";
 import "./lib/Position.sol";
+import "./lib/SwapMath.sol";
+import "./lib/Tick.sol";
+import "./lib/TickBitmap.sol";
+import "./lib/TickMath.sol";
 
 contract UniswapV3Pool {
     using Tick for mapping(int24 => Tick.Info);
+    using TickBitmap for mapping(int16 => uint256);
     using Position for mapping(bytes32 => Position.Info);
     using Position for Position.Info;
 
@@ -57,11 +62,27 @@ contract UniswapV3Pool {
         address payer;
     }
 
+    struct SwapState {
+        uint256 amountSpecifiedRemaining;
+        uint256 amountCalculated;
+        uint160 sqrtPriceX96;
+        int24 tick;
+    }
+
+    struct StepState {
+        uint160 sqrtPriceStartX96;
+        int24 nextTick;
+        uint160 sqrtPriceNextX96;
+        uint256 amountIn;
+        uint256 amountOut;
+    }
+
     Slot0 public slot0;
 
     uint128 public liquidity; // amount of liquidity L
     // Ticks info
     mapping(int24 => Tick.Info) public ticks; // index  to tick info mapping
+    mapping (int16 => uint256) public tickBitmap; // word to liquidity
     mapping(bytes32 => Position.Info) public positions; // tick to postion info mapping
 
     constructor(
@@ -81,7 +102,7 @@ contract UniswapV3Pool {
         address owner, // address depositing
         int24 lowerTick, // lower price range
         int24 upperTick, // upper price range
-        uint128 amount, // amount depositing
+        uint128 amount, // amount depositing - liquidity
         bytes calldata data // data holding details
     ) external returns (uint256 amount0, uint256 amount1) {
 
@@ -95,19 +116,29 @@ contract UniswapV3Pool {
         }
 
         // update tick and positions
-        ticks.update(lowerTick,amount);
-        ticks.update(upperTick, amount);
+        bool flippedLower = ticks.update(lowerTick,amount);
+        bool flippedUpper = ticks.update(upperTick, amount);
+
+        if (flippedLower) {
+            tickBitmap.flipTick(lowerTick, 1);
+        }
+
+        if (flippedUpper) {
+            tickBitmap.flipTick(upperTick, 1);
+        }
 
         Position.Info storage position = positions.get(owner, lowerTick, upperTick);
         position.update(amount);
 
-        // amounts - hard coded for now
-        amount0 = 0.998976618347425280 ether;
-        amount1 = 5000 ether;
+        Slot0 memory slot0_ = slot0;
+
+        // calculating amount from liquidity
+        amount0 = Math.calcAmount0Delta(TickMath.getSqrtRatioAtTick(slot0_.tick), TickMath.getSqrtRatioAtTick(upperTick), amount);
+        amount1 = Math.calcAmount1Delta(TickMath.getSqrtRatioAtTick(slot0_.tick), TickMath.getSqrtRatioAtTick(lowerTick), amount);
 
         liquidity += uint128(amount);
 
-        // balance checks
+        // // balance checks
         uint256 balance0Before;
         uint256 balance1Before;
 
@@ -130,7 +161,7 @@ contract UniswapV3Pool {
             revert InsufficientInputAmount();
         }
 
-        // mint completion
+        // // mint completion
         emit Mint(msg.sender, owner, lowerTick, upperTick, amount, amount0, amount1);
     }
 
@@ -154,7 +185,7 @@ contract UniswapV3Pool {
 
         // balance check for validation
         if (balanceBefore1 + uint256(amount1) > balance1()) {
-            revert InsufficientInputAmount();
+            revert InsufficientInputAmount();    
         }
 
         // one way swap complete
